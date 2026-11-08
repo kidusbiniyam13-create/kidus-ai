@@ -1,229 +1,395 @@
-import React, { useEffect, useState } from "react";
+
+import React, { useState, useRef, useEffect } from 'react';
 import {
-  ActivityIndicator, FlatList, KeyboardAvoidingView, Platform,
-  Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View
-} from "react-native";
-import { supabase } from "./src/supabase";
+  View, Text, TextInput, Pressable, ScrollView,
+  StyleSheet, StatusBar, KeyboardAvoidingView,
+  Platform, ActivityIndicator
+} from 'react-native';
+import * as Speech from 'expo-speech';
+
+const API_URL =
+  'https://kidus-ai-backend.kidusbiniyam13.workers.dev';
+
+const PLANS = [
+  { name: 'Starter', price: 50, limit: 30 },
+  { name: 'Basic', price: 100, limit: 75 },
+  { name: 'Plus', price: 200, limit: 150 },
+  { name: 'Pro', price: 250, limit: 300 },
+  { name: 'Ultra', price: 500, limit: 600 },
+  { name: 'Ultimate', price: 1000, limit: 1500 }
+];
 
 export default function App() {
-  const [session, setSession] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState("signin");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState("");
-  const [conversations, setConversations] = useState([]);
-  const [conversationId, setConversationId] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [draft, setDraft] = useState("");
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setLoading(false);
-    });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => {
-      setSession(next);
-    });
-    return () => listener.subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (session?.user) loadConversations();
-    else { setConversations([]); setMessages([]); setConversationId(null); }
-  }, [session]);
-
-  async function authenticate() {
-    setNotice("");
-    if (!email.trim() || password.length < 6) {
-      setNotice("Enter your email and a password with at least 6 characters.");
-      return;
+  const [input, setInput] = useState('');
+  const [screen, setScreen] = useState('chat');
+  const [selectedPlan, setSelectedPlan] = useState(null);
+  const [messages, setMessages] = useState([
+    {
+      role: 'assistant',
+      content: "Hey! I'm KIDUS AI. What's on your mind? 😎"
     }
-    setBusy(true);
-    const result = mode === "signup"
-      ? await supabase.auth.signUp({ email: email.trim(), password })
-      : await supabase.auth.signInWithPassword({ email: email.trim(), password });
-    setBusy(false);
-    if (result.error) setNotice(result.error.message);
-    else if (mode === "signup" && !result.data.session)
-      setNotice("Account created. Check your email to confirm it, then sign in.");
-    else setNotice("You're signed in.");
-  }
+  ]);
+  const [loading, setLoading] = useState(false);
+  const [listening, setListening] = useState(false);
+  const scrollRef = useRef(null);
 
-  async function loadConversations() {
-    const { data, error } = await supabase.from("conversations")
-      .select("id,title,created_at").order("created_at", { ascending: false });
-    if (error) setNotice(error.message);
-    else setConversations(data || []);
-  }
-
-  async function openConversation(id) {
-    setConversationId(id);
-    const { data, error } = await supabase.from("messages")
-      .select("id,role,content,created_at").eq("conversation_id", id)
-      .order("created_at", { ascending: true });
-    if (error) setNotice(error.message);
-    else setMessages(data || []);
-  }
-
-  async function newConversation() {
-    setConversationId(null);
-    setMessages([]);
-    setNotice("Start typing to create a new conversation.");
-  }
+  useEffect(() => {
+    scrollRef.current?.scrollToEnd({ animated: true });
+  }, [messages, loading]);
 
   async function sendMessage() {
-    const text = draft.trim();
-    if (!text || busy) return;
-    setDraft("");
-    setNotice("");
-    const optimistic = [...messages, { id: String(Date.now()), role: "user", content: text }];
-    setMessages(optimistic);
-    setBusy(true);
+    const message = input.trim();
+    if (!message || loading) return;
+
+    const history = messages.slice(-10).map(m => ({
+      role: m.role,
+      content: m.content
+    }));
+
+    setMessages(old => [
+      ...old,
+      { role: 'user', content: message }
+    ]);
+    setInput('');
+    setLoading(true);
+
     try {
-      let id = conversationId;
-      if (!id) {
-        const { data, error } = await supabase.from("conversations")
-          .insert({ user_id: session.user.id, title: text.slice(0, 60) })
-          .select("id").single();
-        if (error) throw error;
-        id = data.id;
-        setConversationId(id);
-      }
-      const { error: saveError } = await supabase.from("messages")
-        .insert({ conversation_id: id, user_id: session.user.id, role: "user", content: text });
-      if (saveError) throw saveError;
-
-      const { data: history, error: historyError } = await supabase.from("messages")
-        .select("role,content").eq("conversation_id", id)
-        .order("created_at", { ascending: true }).limit(30);
-      if (historyError) throw historyError;
-
-      const { data: answer, error: aiError } = await supabase.functions.invoke("chat", {
-        body: { messages: history || [] }
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, history })
       });
-      if (aiError) throw aiError;
-      if (!answer?.reply) throw new Error("The AI did not return a reply. Check your backend setup.");
-      const { error: assistantSaveError } = await supabase.from("messages")
-        .insert({ conversation_id: id, user_id: session.user.id, role: "assistant", content: answer.reply });
-      if (assistantSaveError) throw assistantSaveError;
-      setMessages([...optimistic, { id: String(Date.now() + 1), role: "assistant", content: answer.reply }]);
-      loadConversations();
-    } catch (e) {
-      setNotice(e.message || "Something went wrong.");
-    } finally { setBusy(false); }
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'AI connection failed.');
+      }
+
+      setMessages(old => [
+        ...old,
+        {
+          role: 'assistant',
+          content: data.reply || 'No response received.'
+        }
+      ]);
+    } catch (error) {
+      setMessages(old => [
+        ...old,
+        {
+          role: 'assistant',
+          content: 'Connection error: ' + error.message
+        }
+      ]);
+    } finally {
+      setLoading(false);
+    }
   }
 
-  if (loading) return <Centered><ActivityIndicator size="large" color="#8b5cf6" /></Centered>;
+  function speak(text) {
+    Speech.stop();
+    Speech.speak(text, { language: 'en-US' });
+  }
 
-  if (!session) return (
-    <SafeAreaView style={s.page}>
-      <View style={s.authCard}>
-        <Text style={s.logo}>KIDUS AI</Text>
-        <Text style={s.subtitle}>Your personal AI assistant</Text>
-        <Text style={s.heading}>{mode === "signup" ? "Create your account" : "Welcome back"}</Text>
-        <TextInput style={s.input} placeholder="Email address" placeholderTextColor="#8b8fa3"
-          autoCapitalize="none" keyboardType="email-address" value={email} onChangeText={setEmail} />
-        <TextInput style={s.input} placeholder="Password (6+ characters)" placeholderTextColor="#8b8fa3"
-          secureTextEntry value={password} onChangeText={setPassword} />
-        {!!notice && <Text style={s.notice}>{notice}</Text>}
-        <Pressable style={s.primary} onPress={authenticate} disabled={busy}>
-          {busy ? <ActivityIndicator color="white" /> : <Text style={s.primaryText}>{mode === "signup" ? "Create account" : "Sign in"}</Text>}
-        </Pressable>
-        <Pressable onPress={() => { setMode(mode === "signup" ? "signin" : "signup"); setNotice(""); }}>
-          <Text style={s.switch}>{mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}</Text>
-        </Pressable>
+  function startListening() {
+    if (Platform.OS !== 'web') {
+      alert('Voice input is available in the web version for now.');
+      return;
+    }
+
+    const Recognition =
+      window.SpeechRecognition ||
+      window.webkitSpeechRecognition;
+
+    if (!Recognition) {
+      alert('Please use Chrome or Edge for voice input.');
+      return;
+    }
+
+    const recognition = new Recognition();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+
+    recognition.onstart = () => setListening(true);
+    recognition.onend = () => setListening(false);
+    recognition.onresult = event => {
+      setInput(event.results[0][0].transcript);
+    };
+    recognition.onerror = () => {
+      setListening(false);
+      alert('Voice recognition failed.');
+    };
+
+    recognition.start();
+  }
+
+  const styles = StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: '#10101b',
+      minHeight: Platform.OS === 'web' ? '100vh' : undefined
+    },
+    header: {
+      padding: 20,
+      paddingTop: 35,
+      backgroundColor: '#19192a',
+      borderBottomWidth: 1,
+      borderBottomColor: '#33334b'
+    },
+    logo: {
+      color: 'white',
+      fontSize: 25,
+      fontWeight: 'bold'
+    },
+    status: {
+      color: '#a78bfa',
+      fontSize: 11,
+      marginTop: 5
+    },
+    upgradeButton: {
+      backgroundColor: '#7055d8',
+      padding: 12,
+      borderRadius: 10,
+      marginTop: 12,
+      alignItems: 'center'
+    },
+    chat: { flex: 1 },
+    chatContent: { padding: 15, flexGrow: 1 },
+    message: {
+      padding: 14,
+      borderRadius: 15,
+      marginBottom: 12,
+      maxWidth: '88%'
+    },
+    userMessage: {
+      alignSelf: 'flex-end',
+      backgroundColor: '#5541a8'
+    },
+    aiMessage: {
+      alignSelf: 'flex-start',
+      backgroundColor: '#242438'
+    },
+    sender: {
+      color: '#c4b5fd',
+      fontSize: 10,
+      fontWeight: 'bold',
+      marginBottom: 7
+    },
+    messageText: {
+      color: 'white',
+      fontSize: 15,
+      lineHeight: 22
+    },
+    speak: { color: '#c4b5fd', marginTop: 10 },
+    loading: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      padding: 12
+    },
+    loadingText: { color: '#aaa', marginLeft: 10 },
+    inputArea: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      padding: 12,
+      backgroundColor: '#19192a',
+      gap: 8
+    },
+    input: {
+      flex: 1,
+      backgroundColor: '#29293e',
+      color: 'white',
+      borderRadius: 12,
+      padding: 13
+    },
+    mic: {
+      backgroundColor: '#29293e',
+      padding: 12,
+      borderRadius: 12
+    },
+    send: {
+      backgroundColor: '#7055d8',
+      padding: 13,
+      borderRadius: 12
+    },
+    buttonText: { color: 'white', fontSize: 15 },
+    heading: {
+      color: 'white',
+      fontSize: 21,
+      fontWeight: 'bold',
+      marginVertical: 15
+    },
+    planOption: {
+      backgroundColor: '#242438',
+      padding: 17,
+      borderRadius: 13,
+      marginBottom: 12,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center'
+    },
+    planCard: {
+      backgroundColor: '#292344',
+      padding: 20,
+      borderRadius: 15,
+      marginBottom: 15
+    },
+    planName: {
+      color: 'white',
+      fontSize: 17,
+      fontWeight: 'bold'
+    },
+    price: {
+      color: '#c4b5fd',
+      fontSize: 18,
+      fontWeight: 'bold'
+    },
+    description: {
+      color: '#aaa',
+      marginTop: 6,
+      lineHeight: 21
+    },
+    notice: {
+      backgroundColor: '#45351c',
+      padding: 15,
+      borderRadius: 12,
+      marginTop: 15
+    },
+    noticeText: { color: '#ffdb9b', lineHeight: 21 },
+    backButton: {
+      backgroundColor: '#5541a8',
+      padding: 15,
+      borderRadius: 12,
+      alignItems: 'center',
+      marginTop: 20
+    }
+  });
+
+  if (screen === 'payment') {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="light-content" />
+        <View style={styles.header}>
+          <Text style={styles.logo}>KIDUS AI</Text>
+          <Text style={styles.status}>PREMIUM SUBSCRIPTION</Text>
+        </View>
+        <ScrollView contentContainerStyle={styles.chatContent}>
+          <Text style={styles.heading}>Your selected plan</Text>
+          <View style={styles.planCard}>
+            <Text style={styles.planName}>{selectedPlan.name}</Text>
+            <Text style={styles.price}>
+              {selectedPlan.price.toLocaleString()} ETB / month
+            </Text>
+            <Text style={styles.description}>
+              {selectedPlan.limit} AI messages per day
+            </Text>
+          </View>
+          <Text style={styles.heading}>Payment information</Text>
+          <Text style={styles.description}>
+            Telebirr payment integration is not connected yet.
+            Official payment setup is required before accepting payments.
+          </Text>
+          <View style={styles.notice}>
+            <Text style={styles.noticeText}>
+              Your subscription will only activate after payment verification.
+            </Text>
+          </View>
+          <Pressable style={styles.backButton}
+            onPress={() => setScreen('plans')}>
+            <Text style={styles.buttonText}>Back to plans</Text>
+          </Pressable>
+        </ScrollView>
       </View>
-    </SafeAreaView>
-  );
+    );
+  }
+
+  if (screen === 'plans') {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="light-content" />
+        <View style={styles.header}>
+          <Text style={styles.logo}>KIDUS AI</Text>
+          <Text style={styles.status}>CHOOSE YOUR PREMIUM PLAN</Text>
+        </View>
+        <ScrollView contentContainerStyle={styles.chatContent}>
+          <Text style={styles.heading}>Upgrade your AI access</Text>
+          {PLANS.map(plan => (
+            <Pressable key={plan.name} style={styles.planOption}
+              onPress={() => {
+                setSelectedPlan(plan);
+                setScreen('payment');
+              }}>
+              <View>
+                <Text style={styles.planName}>{plan.name}</Text>
+                <Text style={styles.description}>
+                  {plan.limit} messages per day
+                </Text>
+              </View>
+              <Text style={styles.price}>
+                {plan.price.toLocaleString()} ETB
+              </Text>
+            </Pressable>
+          ))}
+          <Pressable style={styles.backButton}
+            onPress={() => setScreen('chat')}>
+            <Text style={styles.buttonText}>Back to chat</Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+    );
+  }
 
   return (
-    <SafeAreaView style={s.page}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-        <View style={s.header}>
-          <View><Text style={s.logoSmall}>KIDUS AI</Text><Text style={s.subtitleSmall}>Your personal AI assistant</Text></View>
-          <Pressable onPress={() => supabase.auth.signOut()}><Text style={s.signOut}>Sign out</Text></Pressable>
-        </View>
-        <View style={s.workspace}>
-          <View style={s.sidebar}>
-            <Pressable style={s.newButton} onPress={newConversation}><Text style={s.newButtonText}>+ New chat</Text></Pressable>
-            <Text style={s.sideLabel}>RECENT CHATS</Text>
-            <ScrollView>
-              {conversations.map(c => (
-                <Pressable key={c.id} style={[s.chatLink, conversationId === c.id && s.chatActive]} onPress={() => openConversation(c.id)}>
-                  <Text numberOfLines={2} style={s.chatLinkText}>{c.title || "New conversation"}</Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-          </View>
-          <View style={s.chatArea}>
-            <View style={s.messageList}>
-              {messages.length === 0 ? (
-                <View style={s.welcome}><Text style={s.welcomeTitle}>What can I help you with?</Text><Text style={s.welcomeSub}>Ask a question to start chatting.</Text></View>
-              ) : messages.map((m, i) => (
-                <View key={m.id || i} style={[s.message, m.role === "user" ? s.userMessage : s.aiMessage]}>
-                  <Text style={s.role}>{m.role === "user" ? "YOU" : "KIDUS AI"}</Text>
-                  <Text style={s.messageText}>{m.content}</Text>
-                </View>
-              ))}
-              {busy && <ActivityIndicator color="#a78bfa" style={{ margin: 12 }} />}
-            </View>
-            {!!notice && <Text style={s.notice}>{notice}</Text>}
-            <View style={s.composer}>
-              <TextInput style={s.composerInput} placeholder="Message KIDUS AI..." placeholderTextColor="#8b8fa3"
-                value={draft} onChangeText={setDraft} multiline />
-              <Pressable style={s.sendButton} onPress={sendMessage} disabled={busy || !draft.trim()}>
-                <Text style={s.sendText}>↑</Text>
+    <KeyboardAvoidingView style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <StatusBar barStyle="light-content" />
+      <View style={styles.header}>
+        <Text style={styles.logo}>KIDUS AI</Text>
+        <Text style={styles.status}>● AI ASSISTANT ONLINE</Text>
+        <Pressable style={styles.upgradeButton}
+          onPress={() => setScreen('plans')}>
+          <Text style={styles.buttonText}>⭐ Upgrade to Premium</Text>
+        </Pressable>
+      </View>
+
+      <ScrollView ref={scrollRef} style={styles.chat}
+        contentContainerStyle={styles.chatContent}>
+        {messages.map((item, index) => (
+          <View key={index}
+            style={[styles.message,
+              item.role === 'user' ? styles.userMessage : styles.aiMessage]}>
+            <Text style={styles.sender}>
+              {item.role === 'user' ? 'YOU' : 'KIDUS AI'}
+            </Text>
+            <Text style={styles.messageText}>{item.content}</Text>
+            {item.role === 'assistant' && (
+              <Pressable onPress={() => speak(item.content)}>
+                <Text style={styles.speak}>🔊 Speak</Text>
               </Pressable>
-            </View>
-            <Text style={s.disclaimer}>KIDUS AI can make mistakes. Check important information.</Text>
+            )}
           </View>
-        </View>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        ))}
+        {loading && (
+          <View style={styles.loading}>
+            <ActivityIndicator color="#a78bfa" />
+            <Text style={styles.loadingText}>KIDUS AI is thinking...</Text>
+          </View>
+        )}
+      </ScrollView>
+
+      <View style={styles.inputArea}>
+        <Pressable style={styles.mic} onPress={startListening}>
+          <Text style={styles.buttonText}>{listening ? '🔴' : '🎤'}</Text>
+        </Pressable>
+        <TextInput style={styles.input} value={input}
+          onChangeText={setInput}
+          placeholder="Ask KIDUS AI anything..."
+          placeholderTextColor="#888"
+          onSubmitEditing={sendMessage} />
+        <Pressable style={styles.send} onPress={sendMessage}
+          disabled={loading}>
+          <Text style={styles.buttonText}>➤</Text>
+        </Pressable>
+      </View>
+    </KeyboardAvoidingView>
   );
 }
-
-function Centered({ children }) { return <View style={s.center}>{children}</View>; }
-
-const s = StyleSheet.create({
-  page: { flex: 1, backgroundColor: "#0b1020" },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#0b1020" },
-  authCard: { width: "90%", maxWidth: 420, alignSelf: "center", marginTop: 70, padding: 24, backgroundColor: "#151b2e", borderRadius: 22 },
-  logo: { color: "#c4b5fd", fontSize: 30, fontWeight: "900", letterSpacing: 2, textAlign: "center" },
-  subtitle: { color: "#a1a1aa", textAlign: "center", marginTop: 5, marginBottom: 32 },
-  heading: { color: "white", fontSize: 22, fontWeight: "700", marginBottom: 18 },
-  input: { backgroundColor: "#0b1020", borderWidth: 1, borderColor: "#30384f", borderRadius: 12, color: "white", padding: 14, marginBottom: 12 },
-  primary: { backgroundColor: "#7c3aed", padding: 15, borderRadius: 12, alignItems: "center", marginTop: 6 },
-  primaryText: { color: "white", fontWeight: "700" },
-  switch: { color: "#c4b5fd", textAlign: "center", marginTop: 20 },
-  notice: { color: "#fbbf24", padding: 8, fontSize: 13 },
-  header: { minHeight: 66, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderColor: "#252d42", flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  logoSmall: { color: "#c4b5fd", fontWeight: "900", fontSize: 20, letterSpacing: 1.5 },
-  subtitleSmall: { color: "#8b8fa3", fontSize: 11 },
-  signOut: { color: "#c4b5fd", padding: 8 },
-  workspace: { flex: 1, flexDirection: "row" },
-  sidebar: { width: 190, backgroundColor: "#11182a", padding: 10, borderRightWidth: 1, borderColor: "#252d42" },
-  newButton: { borderWidth: 1, borderColor: "#6552a4", borderRadius: 10, padding: 11, marginBottom: 22 },
-  newButtonText: { color: "white", fontWeight: "600", textAlign: "center" },
-  sideLabel: { color: "#777f98", fontSize: 10, fontWeight: "700", marginBottom: 9, marginLeft: 4 },
-  chatLink: { padding: 10, borderRadius: 8, marginBottom: 4 },
-  chatActive: { backgroundColor: "#29314a" },
-  chatLinkText: { color: "#d4d4dc", fontSize: 12 },
-  chatArea: { flex: 1, padding: 12, minWidth: 0 },
-  messageList: { flex: 1 },
-  welcome: { flex: 1, justifyContent: "center", alignItems: "center" },
-  welcomeTitle: { color: "white", fontSize: 22, fontWeight: "700", textAlign: "center" },
-  welcomeSub: { color: "#969bb0", marginTop: 8 },
-  message: { padding: 13, borderRadius: 14, marginBottom: 10, maxWidth: "94%" },
-  userMessage: { backgroundColor: "#34265c", alignSelf: "flex-end" },
-  aiMessage: { backgroundColor: "#192238", alignSelf: "flex-start" },
-  role: { color: "#b9a8f4", fontSize: 10, fontWeight: "800", marginBottom: 5 },
-  messageText: { color: "#f4f4f5", lineHeight: 21 },
-  composer: { flexDirection: "row", alignItems: "flex-end", backgroundColor: "#151b2e", borderWidth: 1, borderColor: "#30384f", borderRadius: 14, padding: 7 },
-  composerInput: { flex: 1, color: "white", padding: 8, maxHeight: 110, minHeight: 40 },
-  sendButton: { backgroundColor: "#7c3aed", borderRadius: 10, width: 40, height: 40, alignItems: "center", justifyContent: "center" },
-  sendText: { color: "white", fontSize: 23, fontWeight: "700" },
-  disclaimer: { color: "#697189", fontSize: 10, textAlign: "center", marginTop: 7 }
-});
