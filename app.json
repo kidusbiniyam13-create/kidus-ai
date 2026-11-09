@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "KIDUS AI",
+    "slug": "kidusai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "web": {
+      "output": "single",
+      "name": "KIDUS AI",
+      "description": "Your intelligent AI assistant."
+    }
+  }
+}
